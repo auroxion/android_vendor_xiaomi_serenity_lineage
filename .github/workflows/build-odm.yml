@@ -1,0 +1,205 @@
+
+name: Build Redmi A5 ODM Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (leave empty for automatic tag)"
+        required: false
+        type: string
+
+  push:
+    tags:
+      - "odm-*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: serenity-odm-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64, android-build]
+    timeout-minutes: 720
+
+    env:
+      LINEAGE_BRANCH: lineage-23.2
+      ANDROID_TOP: ${{ runner.temp }}/lineage-serenity
+
+    steps:
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache \
+            curl flex g++-multilib gcc-multilib \
+            git git-lfs gnupg gperf \
+            imagemagick lib32readline-dev lib32z1-dev \
+            libelf-dev liblz4-tool libncurses-dev \
+            libssl-dev libxml2-utils lzop \
+            pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip \
+            zlib1g-dev python3 python-is-python3 \
+            python3-protobuf python3-yaml \
+            python3-mako openjdk-21-jdk
+
+          git lfs install
+
+      - name: Install repo tool
+        shell: bash
+        run: |
+          mkdir -p "$HOME/bin"
+
+          curl -fsSL \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize LineageOS source
+        shell: bash
+        run: |
+          mkdir -p "$ANDROID_TOP"
+          cd "$ANDROID_TOP"
+
+          repo init \
+            -u https://github.com/LineageOS/android.git \
+            -b "$LINEAGE_BRANCH" \
+            --git-lfs \
+            --depth 1
+
+      - name: Register Redmi A5 repositories
+        shell: bash
+        run: |
+          mkdir -p "$ANDROID_TOP/.repo/local_manifests"
+
+          cat > "$ANDROID_TOP/.repo/local_manifests/serenity.xml" <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <project
+              name="farrizdesignpro1339/android_device_xiaomi_serenity_lineage"
+              path="device/xiaomi/serenity"
+              revision="lineage-23.2" />
+
+            <project
+              name="farrizdesignpro1339/android_vendor_xiaomi_serenity_lineage"
+              path="vendor/xiaomi/serenity"
+              revision="lineage-23.2" />
+          </manifest>
+          EOF
+
+      - name: Sync Android source
+        shell: bash
+        run: |
+          cd "$ANDROID_TOP"
+
+          repo sync \
+            -c \
+            -j6 \
+            --fail-fast \
+            --no-clone-bundle \
+            --no-tags
+
+      - name: Build ODM image
+        shell: bash
+        run: |
+          cd "$ANDROID_TOP"
+
+          source build/envsetup.sh
+
+          lunch lineage_serenity-userdebug
+
+          mka odmimage -j"$(nproc)"
+
+      - name: Verify ODM image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRODUCT_OUT="$ANDROID_TOP/out/target/product/serenity"
+          IMAGE="$PRODUCT_OUT/odm.img"
+
+          test -s "$IMAGE"
+
+          mkdir -p "$GITHUB_WORKSPACE/release"
+
+          cp "$IMAGE" \
+            "$GITHUB_WORKSPACE/release/odm.img"
+
+          cd "$GITHUB_WORKSPACE/release"
+
+          echo "ODM image:"
+          ls -lh odm.img
+          file odm.img
+
+          sha256sum odm.img > SHA256SUMS
+
+      - name: Compress ODM image
+        shell: bash
+        env:
+          XZ_OPT: "-T0 -9e --memlimit-compress=8GiB"
+        run: |
+          set -euo pipefail
+
+          cd "$GITHUB_WORKSPACE/release"
+
+          tar -cJf \
+            odm-serenity-lineage-23.2.tar.xz \
+            odm.img
+
+          xz -t odm-serenity-lineage-23.2.tar.xz
+
+          sha256sum \
+            odm-serenity-lineage-23.2.tar.xz \
+            >> SHA256SUMS
+
+          echo "Archive:"
+          ls -lh odm-serenity-lineage-23.2.tar.xz
+
+      - name: Determine release tag
+        id: release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="${{ inputs.release_tag }}"
+
+            if [[ -z "$TAG" ]]; then
+              TAG="odm-23.2-${GITHUB_RUN_NUMBER}"
+            fi
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: "Redmi A5 ODM Image - ${{ steps.release.outputs.tag }}"
+          body: |
+            ## Redmi A5 / POCO C71 (serenity)
+
+            - Platform: LineageOS 23.2
+            - Android: 16
+            - Partition: ODM
+            - Filesystem: EROFS
+            - Architecture: ARM64
+            - Source: farrizdesignpro1339
+            - Build target: odmimage
+
+            Extract the archive to obtain odm.img.
+
+            Verify SHA256SUMS before flashing.
+
+          files: |
+            release/odm-serenity-lineage-23.2.tar.xz
+            release/SHA256SUMS
+
+          fail_on_unmatched_files: true
+          generate_release_notes: true
