@@ -28,7 +28,7 @@ jobs:
 
     env:
       LINEAGE_BRANCH: lineage-23.2
-      ANDROID_TOP: ${{ runner.temp }}/lineage-serenity
+      ANDROID_TOP: ${{ github.workspace }}/lineage-serenity
 
     steps:
       - name: Install build dependencies
